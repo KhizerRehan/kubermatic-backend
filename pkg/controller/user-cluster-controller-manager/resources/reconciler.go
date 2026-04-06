@@ -38,6 +38,7 @@ import (
 	dnatcontroller "k8c.io/kubermatic/v2/pkg/controller/user-cluster-controller-manager/resources/resources/dnat-controller"
 	envoyagent "k8c.io/kubermatic/v2/pkg/controller/user-cluster-controller-manager/resources/resources/envoy-agent"
 	"k8c.io/kubermatic/v2/pkg/controller/user-cluster-controller-manager/resources/resources/gatekeeper"
+	headlamp "k8c.io/kubermatic/v2/pkg/controller/user-cluster-controller-manager/resources/resources/headlamp"
 	"k8c.io/kubermatic/v2/pkg/controller/user-cluster-controller-manager/resources/resources/konnectivity"
 	kubestatemetrics "k8c.io/kubermatic/v2/pkg/controller/user-cluster-controller-manager/resources/resources/kube-state-metrics"
 	kubernetesresources "k8c.io/kubermatic/v2/pkg/controller/user-cluster-controller-manager/resources/resources/kubernetes"
@@ -152,6 +153,7 @@ func (r *reconciler) reconcile(ctx context.Context) error {
 	data.cloudProviderName = cluster.Spec.Cloud.ProviderName
 	data.clusterVersion = clusterVersion
 	data.kubernetesDashboardEnabled = cluster.Spec.IsKubernetesDashboardEnabled()
+	data.headlampEnabled = cluster.Spec.IsHeadlampEnabled()
 
 	// Must be first because of openshift
 	if err := r.ensureAPIServices(ctx, data); err != nil {
@@ -296,6 +298,12 @@ func (r *reconciler) reconcile(ctx context.Context) error {
 
 	if !data.kubernetesDashboardEnabled {
 		if err := r.ensureKubernetesDashboardResourcesAreRemoved(ctx); err != nil {
+			return err
+		}
+	}
+
+	if !data.headlampEnabled {
+		if err := r.ensureHeadlampResourcesAreRemoved(ctx); err != nil {
 			return err
 		}
 	}
@@ -547,6 +555,10 @@ func (r *reconciler) reconcileClusterRoles(ctx context.Context, data reconcileDa
 		creators = append(creators, kubernetesdashboard.ClusterRoleReconciler())
 	}
 
+	if data.headlampEnabled {
+		creators = append(creators, headlamp.ClusterRoleReconciler())
+	}
+
 	if r.opaIntegration {
 		creators = append(creators, gatekeeper.ClusterRoleReconciler())
 	}
@@ -585,6 +597,10 @@ func (r *reconciler) reconcileClusterRoleBindings(ctx context.Context, data reco
 
 	if data.kubernetesDashboardEnabled {
 		creators = append(creators, kubernetesdashboard.ClusterRoleBindingReconciler())
+	}
+
+	if data.headlampEnabled {
+		creators = append(creators, headlamp.ClusterRoleBindingReconciler())
 	}
 
 	if r.opaIntegration {
@@ -1014,6 +1030,9 @@ func (r *reconciler) reconcileNamespaces(ctx context.Context, data reconcileData
 	if data.kubernetesDashboardEnabled {
 		creators = append(creators, kubernetesdashboard.NamespaceReconciler)
 	}
+	if data.headlampEnabled {
+		creators = append(creators, headlamp.NamespaceReconciler)
+	}
 
 	if r.opaIntegration {
 		creators = append(creators, gatekeeper.NamespaceReconciler)
@@ -1176,6 +1195,7 @@ type reconcileData struct {
 	k8sServiceEndpointPort      int32
 	reconcileK8sSvcEndpoints    bool
 	kubernetesDashboardEnabled  bool
+	headlampEnabled             bool
 }
 
 func (r *reconciler) ensureOPAIntegrationIsRemoved(ctx context.Context) error {
@@ -1414,6 +1434,16 @@ func (r *reconciler) ensureKubernetesDashboardResourcesAreRemoved(ctx context.Co
 		err := r.Delete(ctx, resource)
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to ensure Kubernetes Dashboard resources are removed/not present: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r *reconciler) ensureHeadlampResourcesAreRemoved(ctx context.Context) error {
+	for _, resource := range headlamp.ResourcesForDeletion() {
+		err := r.Delete(ctx, resource)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to ensure Headlamp resources are removed/not present: %w", err)
 		}
 	}
 	return nil

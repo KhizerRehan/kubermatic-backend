@@ -137,6 +137,21 @@ func DefaultClusterSpec(
 
 	spec.Cloud.ProviderName = providerName
 
+	// Headlamp migration: if Headlamp is not set but the legacy KubernetesDashboard is,
+	// copy its enabled state so existing clusters preserve their dashboard preference.
+	if spec.Headlamp == nil && spec.KubernetesDashboard != nil {
+		spec.Headlamp = &kubermaticv1.Headlamp{
+			Enabled: spec.KubernetesDashboard.Enabled,
+		}
+	}
+
+	// Headlamp is enabled by default for new clusters.
+	if spec.Headlamp == nil {
+		spec.Headlamp = &kubermaticv1.Headlamp{
+			Enabled: true,
+		}
+	}
+
 	// Kubernetes dashboard is enabled by default.
 	if spec.KubernetesDashboard == nil {
 		spec.KubernetesDashboard = &kubermaticv1.KubernetesDashboard{

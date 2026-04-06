@@ -118,6 +118,14 @@ func (r *Reconciler) clusterHealth(ctx context.Context, cluster *kubermaticv1.Cl
 		extendedHealth.KubernetesDashboard = &status
 	}
 
+	if cluster.Spec.IsHeadlampEnabled() {
+		status, err := r.headlampHealthCheck(ctx, cluster, ns)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get headlamp health: %w", err)
+		}
+		extendedHealth.Headlamp = &status
+	}
+
 	if cluster.Spec.IsKubeLBEnabled() {
 		status, err := r.kubeLBHealthCheck(ctx, cluster, ns)
 		if err != nil {
@@ -242,6 +250,17 @@ func (r *Reconciler) kubernetesDashboardHealthCheck(ctx context.Context, cluster
 	status, err := resources.HealthyDeployment(ctx, r, key, 1)
 	if err != nil {
 		return kubermaticv1.HealthStatusDown, fmt.Errorf("failed to determine deployment's health %q: %w", resources.KubernetesDashboardDeploymentName, err)
+	}
+	status = util.GetHealthStatus(status, cluster, r.versions)
+	return status, nil
+}
+
+func (r *Reconciler) headlampHealthCheck(ctx context.Context, cluster *kubermaticv1.Cluster, namespace string) (kubermaticv1.HealthStatus, error) {
+	// check for the health of headlamp deployment.
+	key := types.NamespacedName{Namespace: namespace, Name: resources.HeadlampDeploymentName}
+	status, err := resources.HealthyDeployment(ctx, r, key, 1)
+	if err != nil {
+		return kubermaticv1.HealthStatusDown, fmt.Errorf("failed to determine deployment's health %q: %w", resources.HeadlampDeploymentName, err)
 	}
 	status = util.GetHealthStatus(status, cluster, r.versions)
 	return status, nil

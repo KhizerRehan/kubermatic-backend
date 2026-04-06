@@ -3707,6 +3707,15 @@ spec:
                   required:
                     - enabled
                   type: object
+                headlamp:
+                  description: |-
+                    Headlamp controls the Headlamp dashboard for this cluster.
+                    If not set, Headlamp is enabled by default.
+                  properties:
+                    enabled:
+                      description: Enabled controls whether the Headlamp dashboard is deployed to the user cluster.
+                      type: boolean
+                  type: object
                 kubernetesDashboard:
                   description: KubernetesDashboard holds the configuration for the kubernetes-dashboard component.
                   properties:

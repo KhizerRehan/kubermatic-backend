@@ -664,6 +664,9 @@ func getTemplateData(config *kubermaticv1.KubermaticConfiguration, clusterVersio
 	fakeCluster.Spec.KubernetesDashboard = &kubermaticv1.KubernetesDashboard{
 		Enabled: true,
 	}
+	fakeCluster.Spec.Headlamp = &kubermaticv1.Headlamp{
+		Enabled: true,
+	}
 
 	fakeCluster.Status.NamespaceName = mockNamespaceName
 	fakeCluster.Status.Versions.ControlPlane = *clusterSemver

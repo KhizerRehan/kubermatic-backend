@@ -229,7 +229,13 @@ type ClusterSpec struct {
 	KubeLB *KubeLB `json:"kubelb,omitempty"`
 
 	// KubernetesDashboard holds the configuration for the kubernetes-dashboard component.
+	// Deprecated: Use Headlamp instead.
 	KubernetesDashboard *KubernetesDashboard `json:"kubernetesDashboard,omitempty"`
+
+	// Headlamp controls the Headlamp dashboard for this cluster.
+	// If not set, Headlamp is enabled by default.
+	// +optional
+	Headlamp *Headlamp `json:"headlamp,omitempty"`
 
 	// Optional: AuditLogging configures Kubernetes API audit logging (https://kubernetes.io/docs/tasks/debug-application-cluster/audit/)
 	// for the user cluster.
@@ -285,6 +291,7 @@ type ClusterSpec struct {
 }
 
 // KubernetesDashboard contains settings for the kubernetes-dashboard component as part of the cluster control plane.
+// Deprecated: Use Headlamp instead.
 type KubernetesDashboard struct {
 	// Controls whether kubernetes-dashboard is deployed to the user cluster or not.
 	// Enabled by default.
@@ -293,6 +300,27 @@ type KubernetesDashboard struct {
 
 func (c ClusterSpec) IsKubernetesDashboardEnabled() bool {
 	return c.KubernetesDashboard == nil || c.KubernetesDashboard.Enabled
+}
+
+// Headlamp configures the Headlamp dashboard for the cluster.
+type Headlamp struct {
+	// Enabled controls whether the Headlamp dashboard is deployed to the user cluster.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// IsHeadlampEnabled returns whether the Headlamp dashboard is enabled for this cluster.
+// If spec.Headlamp is set, its Enabled field is used. If only the legacy KubernetesDashboard
+// is set, its Enabled field is used as a migration fallback. Otherwise Headlamp is enabled
+// by default.
+func (c ClusterSpec) IsHeadlampEnabled() bool {
+	if c.Headlamp != nil {
+		return c.Headlamp.Enabled
+	}
+	if c.KubernetesDashboard != nil {
+		return c.KubernetesDashboard.Enabled
+	}
+	return true
 }
 
 // HasAdmissionPlugin reports whether the given admission plugin name exists in AdmissionPlugins.
@@ -1732,6 +1760,7 @@ type ExtendedClusterHealth struct {
 	MLAGateway                   *HealthStatus `json:"mlaGateway,omitempty"`
 	OperatingSystemManager       *HealthStatus `json:"operatingSystemManager,omitempty"`
 	KubernetesDashboard          *HealthStatus `json:"kubernetesDashboard,omitempty"`
+	Headlamp                     *HealthStatus `json:"headlamp,omitempty"`
 	KubeLB                       *HealthStatus `json:"kubelb,omitempty"`
 	Kyverno                      *HealthStatus `json:"kyverno,omitempty"`
 }

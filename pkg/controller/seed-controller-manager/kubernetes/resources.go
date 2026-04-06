@@ -42,6 +42,7 @@ import (
 	"k8c.io/kubermatic/v2/pkg/resources/dns"
 	"k8c.io/kubermatic/v2/pkg/resources/etcd"
 	"k8c.io/kubermatic/v2/pkg/resources/gatekeeper"
+	headlamp "k8c.io/kubermatic/v2/pkg/resources/headlamp"
 	"k8c.io/kubermatic/v2/pkg/resources/konnectivity"
 	kubernetesdashboard "k8c.io/kubermatic/v2/pkg/resources/kubernetes-dashboard"
 	"k8c.io/kubermatic/v2/pkg/resources/machinecontroller"
@@ -206,6 +207,13 @@ func (r *Reconciler) ensureResourcesAreDeployed(ctx context.Context, cluster *ku
 	// Ensure that kubernetes-dashboard is completely removed, when disabled
 	if !cluster.Spec.IsKubernetesDashboardEnabled() {
 		if err := r.ensureKubernetesDashboardResourcesAreRemoved(ctx, data); err != nil {
+			return nil, err
+		}
+	}
+
+	// Ensure that headlamp is completely removed, when disabled
+	if !cluster.Spec.IsHeadlampEnabled() {
+		if err := r.ensureHeadlampResourcesAreRemoved(ctx, data); err != nil {
 			return nil, err
 		}
 	}
@@ -441,6 +449,10 @@ func GetDeploymentReconcilers(data *resources.TemplateData, features Features, v
 		deployments = append(deployments, kubernetesdashboard.DeploymentReconciler(data))
 	}
 
+	if data.Cluster().Spec.IsHeadlampEnabled() {
+		deployments = append(deployments, headlamp.DeploymentReconciler(data))
+	}
+
 	if !data.IsKonnectivityEnabled() {
 		deployments = append(deployments,
 			openvpn.DeploymentReconciler(data),
@@ -555,6 +567,12 @@ func (r *Reconciler) GetSecretReconcilers(ctx context.Context, data *resources.T
 	if data.Cluster().Spec.IsKubernetesDashboardEnabled() {
 		creators = append(creators,
 			resources.GetInternalKubeconfigReconciler(namespace, resources.KubernetesDashboardKubeconfigSecretName, resources.KubernetesDashboardCertUsername, nil, data, r.log),
+		)
+	}
+
+	if data.Cluster().Spec.IsHeadlampEnabled() {
+		creators = append(creators,
+			resources.GetInternalKubeconfigReconciler(namespace, resources.HeadlampKubeconfigSecretName, resources.HeadlampCertUsername, nil, data, r.log),
 		)
 	}
 
@@ -973,6 +991,16 @@ func (r *Reconciler) ensureKubernetesDashboardResourcesAreRemoved(ctx context.Co
 		err := r.Delete(ctx, resource)
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to ensure kubernetes-dashboard resources are removed/not present: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) ensureHeadlampResourcesAreRemoved(ctx context.Context, data *resources.TemplateData) error {
+	for _, resource := range headlamp.ResourcesForDeletion(data.Cluster().Status.NamespaceName) {
+		err := r.Delete(ctx, resource)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to ensure Headlamp resources are removed/not present: %w", err)
 		}
 	}
 	return nil

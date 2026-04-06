@@ -100,6 +100,8 @@ const (
 	UserClusterControllerContainerName = "usercluster-controller"
 	// KubernetesDashboardDeploymentName is the name of the Kubernetes Dashboard deployment.
 	KubernetesDashboardDeploymentName = "kubernetes-dashboard"
+	// HeadlampDeploymentName is the name of the Headlamp deployment.
+	HeadlampDeploymentName = "headlamp"
 	// KubeLBDeploymentName is the name of the KubeLB deployment.
 	KubeLBDeploymentName = "kubelb-ccm"
 	// MetricsScraperDeploymentName is the name of dashboard-metrics-scraper deployment.
@@ -185,6 +187,8 @@ const (
 	PrometheusApiserverClientCertificateSecretName = "prometheus-apiserver-certificate"
 	// KubernetesDashboardKubeconfigSecretName is the name of the kubeconfig secret user for Kubernetes Dashboard.
 	KubernetesDashboardKubeconfigSecretName = "kubernetes-dashboard-kubeconfig"
+	// HeadlampKubeconfigSecretName is the name of the kubeconfig secret used for Headlamp.
+	HeadlampKubeconfigSecretName = "headlamp-kubeconfig"
 	// WEBTerminalKubeconfigSecretName is the name of the kubeconfig secret user for WEB terminal tools pod.
 	WEBTerminalKubeconfigSecretName = "web-terminal-kubeconfig"
 	// WEBTerminalImage is the name of the image used for the web terminal tool pod.
@@ -309,6 +313,8 @@ const (
 
 	// KubernetesDashboardCertUsername is the name of the user coming from kubeconfig cert.
 	KubernetesDashboardCertUsername = "kubermatic:kubernetes-dashboard"
+	// HeadlampCertUsername is the name of the user coming from kubeconfig cert for Headlamp.
+	HeadlampCertUsername = "kubermatic:headlamp"
 	// MetricsScraperServiceAccountUsername is the name of the user coming from kubeconfig cert.
 	MetricsScraperServiceAccountUsername = "dashboard-metrics-scraper"
 
@@ -355,6 +361,10 @@ const (
 	KubernetesDashboardRoleName = "system:kubernetes-dashboard"
 	// KubernetesDashboardRoleBindingName is the name of the role binding for the Kubernetes Dashboard.
 	KubernetesDashboardRoleBindingName = "system:kubernetes-dashboard"
+	// HeadlampClusterRoleName is the name of the ClusterRole for Headlamp.
+	HeadlampClusterRoleName = "system:headlamp"
+	// HeadlampClusterRoleBindingName is the name of the ClusterRoleBinding for Headlamp.
+	HeadlampClusterRoleBindingName = "system:headlamp"
 	// MetricsScraperClusterRoleName is the name of the role for the dashboard-metrics-scraper.
 	MetricsScraperClusterRoleName = "system:dashboard-metrics-scraper"
 	// MetricsScraperClusterRoleBindingName is the name of the role binding for the dashboard-metrics-scraper.
