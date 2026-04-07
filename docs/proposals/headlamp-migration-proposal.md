@@ -173,7 +173,7 @@ The Application Framework approach was rejected for the following reasons:
 |--------|----------------------------------|-------------------------------|
 | **Architecture change** | Moves dashboard from seed to user cluster — fundamentally different deployment model | No architecture change — same deployment model as today |
 | **Security model** | Dashboard credentials live in user cluster — weaker security boundary | Credentials stay on seed — same security boundary as today |
-| **Blast radius** | Changes how every existing cluster's dashboard is accessed | Changes only what binary is deployed, not how or where |
+| **Radius** | Changes how every existing cluster's dashboard is accessed | Changes only what binary is deployed, not how or where |
 | **Framework coupling** | Core platform component depends on optional Application Framework | No new dependencies — uses proven reconciler infrastructure |
 | **Migration complexity** | Must migrate resources across two different cluster contexts | Swaps one seed deployment for another in the same namespace |
 | **Rollback safety** | Complex rollback across seed and user cluster | Simple: delete headlamp deployment, k8s-dashboard still running |
@@ -905,7 +905,7 @@ Checklist:
 - **Pod monitoring:** Standard Kubernetes deployment monitoring (replicas, restarts, resource usage)
 - **Logs:** Headlamp produces structured JSON logs to stdout
 
-### Air-Gapped Environments
+### Environments
 
 Headlamp container image must be mirrored to `quay.io/kubermatic-mirror` before release. This is done via `pkg/install/images/images.go` which collects all images needed for air-gapped installations.
 
@@ -982,17 +982,6 @@ This occurs because Headlamp tries to write a customized `index.html` with the b
 
 ---
 
-## Open Questions
-
-| # | Question | Impact | Status |
-|---|----------|--------|--------|
-| 1 | How should Cert Manager, KEDA, and Flux plugins be configured in seed-side deployment? | MEDIUM | Deferred to follow-up. Headlamp's plugin system supports both static (baked into image) and dynamic (loaded at runtime) plugins. |
-| 2 | How does Headlamp's OIDC auth integrate with KKP's OIDC provider setup? | MEDIUM | Deferred to follow-up. Headlamp supports `-oidc-client-id`, `-oidc-client-secret`, `-oidc-idp-issuer-url` flags. |
-| 3 | Does Headlamp need `-base-url` for KKP proxy routing? | MEDIUM | Needs testing with actual KKP proxy setup. |
-| 4 | Should the ClusterRole be more restrictive (e.g., remove `rbac.authorization.k8s.io` read access)? | LOW | Security review needed. Current scope matches Headlamp's full feature set. |
-| 5 | How to handle the `MutatingWebhookConfiguration` during local testing? | LOW | Documented in testing scripts: scale down operator, delete webhook, restore after testing. |
-
----
 
 ## Future Work
 
