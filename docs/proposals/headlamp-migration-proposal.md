@@ -2,11 +2,8 @@
 
 - **Issue:** [kubermatic/kubermatic#15287](https://github.com/kubermatic/kubermatic/issues/15287)
 - **Upstream KEP:** [KEP-5008: Move Headlamp to SIG UI](https://github.com/kubernetes/enhancements/tree/master/keps/sig-ui/5008-headlamp)
-- **Status:** Implementable
 - **Target Release:** KKP v2.31
 - **Authors:** @KhizerRehan
-- **Created:** 2026-03-31
-- **Last Updated:** 2026-04-06
 
 ---
 
