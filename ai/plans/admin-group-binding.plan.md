@@ -92,32 +92,55 @@ Three-state reconcile logic:
 
 Because the controller writes `Spec.IsAdmin` (single source of truth), **no existing reader changes**: alertmanager-authorization-server (`cmd/alertmanager-authorization-server/main.go:234`), Grafana MLA (`pkg/controller/seed-controller-manager/mla/user_grafana_controller.go:305`, `org_grafana_controller.go:300`), dashboard `UserInfo` / `/me`.
 
-## 5. Approach
+## 5. Approaches
 
-We go with a **reconciler in this repo** that handles both promotion and demotion. The dashboard already writes `User.Spec.Groups` on every login, so each login triggers a watch event and the controller reacts within a reconcile tick. The dashboard's auth path doesn't change at all.
+Both approaches share the same mechanism: a reconciler in this repo watches `AdminGroupBinding` + `User` and writes `User.Spec.IsAdmin` in both directions (promote and demote). The dashboard already writes `User.Spec.Groups` at login, so every login triggers a reconcile — the dashboard auth path never changes. What differs between the two approaches is how the system remembers **why** a user is an admin, which is what protects manually-granted admins from ever being demoted by group logic.
 
-We looked at two other ways of doing this before settling on the reconciler:
+### Approach 1 — new `IsGroupAdmin` property on the `User` CRD
 
-**Promote at login, demote via reconciler.** The dashboard's `UserSaver` middleware would flip `IsAdmin` during the login request itself, and a small reconciler in this repo would only handle demoting users who never log in again. The upside is that promotion is visible in the same login request instead of a few seconds later. It wasn't worth it: the admin-granting logic ends up split across two repos and two mechanisms, and `UserSaver` has a 1-minute write throttle that would need a bypass. The reconciler alone covers both directions, including users who are offline.
+Add `UserStatus.IsGroupAdmin bool`. The reconciler sets it alongside `Spec.IsAdmin`; a user with `IsGroupAdmin: false` is never touched.
 
-**A config field instead of a CRD.** The first draft of this plan put an `adminGroups` string list on the `KubermaticSetting` singleton, plus a new `UserStatus.IsGroupAdmin` field to remember which admins were group-derived. It's less code — the existing `GET/PATCH /api/v1/admin/settings` API would carry the field for free. Two things killed it. First, `/ws/admin/settings` streams the full settings object to every authenticated user, so the admin group names would leak to non-admins. Second, any new field on the `User` CRD has to be plumbed through the dashboard repo as well (SDK re-vendor, API surface, UI model). The customer also explicitly asked for a CRD, matching how `GroupProjectBinding` already works.
+```mermaid
+flowchart TD
+    L[OIDC login] -->|UserSaver writes Spec.Groups| U[User CR]
+    B[AdminGroupBinding changed] --> R[reconciler]
+    U -->|watch| R
+    R --> DEC{groups match binding?}
+    DEC -->|match & not admin| P["Spec.IsAdmin = true<br/>Status.IsGroupAdmin = true"]
+    DEC -->|no match & IsGroupAdmin=true| D["Spec.IsAdmin = false<br/>Status.IsGroupAdmin = false"]
+    DEC -->|IsGroupAdmin=false| N["never touch<br/>(manual admin)"]
+    P --> API[User CRD schema change:<br/>deepcopy + CRD YAML regen]
+    API --> DASH["dashboard repo must follow:<br/>SDK re-vendor · API model · UI model"]
+```
 
-For remembering *why* someone is an admin, we use the `admin.kubermatic.k8c.io/granted-by-group` annotation on the `User` object rather than a new status field. The annotation needs no API change anywhere, and it stores the name of the granting binding — which is exactly what the UI needs for a "via group X" badge and what the controller needs to know it's allowed to demote. A typed `IsGroupAdmin` bool would be nicer to work with in Go, but it carries less information and drags the dashboard repo into every change.
+Cost: it is a `User` CRD schema change. Deepcopy and CRD YAML must be regenerated here, and the dashboard repo has to re-vendor the SDK and plumb the new property through its API and UI models before it can use it. The field is also just a boolean — it says *that* a group granted admin, not *which* group.
 
-## 6. Does it require multiple codebases to be updated?
+### Approach 2 — annotation on the `User` object (chosen)
 
-Yes — two repositories:
+No schema change. The reconciler stamps `admin.kubermatic.k8c.io/granted-by-group: <binding name>` (already defined, `sdk/apis/kubermatic/v1/admin_group_binding.go:33`) when promoting, and only demotes users carrying the annotation.
 
-| Repo | Module | Changes |
-|---|---|---|
-| `kubermatic/kubermatic` | `sdk/` | `AdminGroupBinding` types, scheme registration, deepcopy, `EvaluateAdminGroups` helper |
-| `kubermatic/kubermatic` | `pkg/crd/` | generated CRD YAML (`master,seed`) |
-| `kubermatic/kubermatic` | `pkg/ee/` | reconciler (promote/demote + annotation) |
-| `kubermatic/kubermatic` | `pkg/webhook/` + operator | validation webhook + `ValidatingWebhookConfiguration` wiring |
-| `kubermatic/dashboard` | `modules/api` | v2 CRUD endpoints + provider; `GetAdmins` surfaces annotation; `SetAdmin` demotion guard |
-| `kubermatic/dashboard` | `modules/web` | new "Admin Groups" page; "via group X" badge + disabled delete on Administrators page |
+```mermaid
+flowchart TD
+    L[OIDC login] -->|UserSaver writes Spec.Groups| U[User CR]
+    B[AdminGroupBinding changed] --> R[reconciler]
+    U -->|watch| R
+    R --> DEC{groups match binding?}
+    DEC -->|match & not admin| P["Spec.IsAdmin = true<br/>+ annotation granted-by-group: &lt;binding&gt;"]
+    DEC -->|no match & annotation present| D["Spec.IsAdmin = false<br/>remove annotation"]
+    DEC -->|annotation absent| N["never touch<br/>(manual admin / first-user auto-admin / service accounts)"]
+    P --> META["no User CRD change —<br/>annotation is plain object metadata"]
+    META --> DASH["dashboard reads annotation as-is:<br/>'via group X' badge, no SDK/model change"]
+```
 
-| Constraint | Detail |
-|---|---|
-| Sequencing | SDK/CRD must merge + tag in `kubermatic/kubermatic` **before** the dashboard can re-vendor (`make update-kkp`) — start both PRs early in the 2.31 cycle |
-| Auth path | dashboard auth path untouched (reconciler owns all `IsAdmin` writes) — dashboard changes are UI/CRUD only |
+The annotation needs no API change in either repo and carries more information: it names the granting binding, which is exactly what the UI needs for a "via group X" badge and what the controller checks before demoting. The trade-off is ergonomics — a typed bool is nicer in Go than a string lookup — but that is not worth a cross-repo schema change.
+
+**Decision: Approach 2.** Zero `User` CRD change, richer provenance, dashboard keeps working untouched.
+
+### Rejected earlier: config field instead of a CRD
+
+The first draft put an `adminGroups` string list on the `KubermaticSetting` singleton (plus Approach 1's `IsGroupAdmin` field). Less code — the existing `GET/PATCH /api/v1/admin/settings` API would carry the field for free — but `/ws/admin/settings` streams the full settings object to every authenticated user, so admin group names would leak to non-admins. The customer also explicitly asked for a CRD, matching how `GroupProjectBinding` already works.
+
+### Rejected earlier: promote-at-login
+
+The dashboard's `UserSaver` middleware would flip `IsAdmin` during the login request itself, with a small reconciler only for demoting offline users. Promotion would be visible in the same login request instead of seconds later, but the admin-granting logic ends up split across two repos and two mechanisms, and `UserSaver` has a 1-minute write throttle that would need a bypass. The reconciler alone covers both directions, including offline users.
+
