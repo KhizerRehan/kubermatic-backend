@@ -149,20 +149,18 @@ flowchart TD
     ADM --> C[same consumers as Approach 2]
 ```
 
-What it actually takes (traced from the investigation, file:line):
+It is workable, but not for free — an admin binding has no project, and everything around `GroupProjectBinding` today assumes there is one. The areas it touches:
 
-| Layer | Change |
-|---|---|
-| CRD schema | `admin` added to role enum (`sdk/apis/kubermatic/v1/group_project_binding.go:65`); `projectID` made optional (`:60-63` — drop required, add `omitempty`; pattern must tolerate absence). Schema change to a **shipped EE CRD**. |
-| Webhook | `pkg/ee/validation/groupprojectbinding/`: `role: admin` must require empty `projectID` (and vice-versa: project roles require it); duplicate-admin-group check; keep projectID immutability for project roles. |
-| Reconciler | `pkg/ee/group-project-binding/controller/reconciler.go`: today it hard-stops if the Project doesn't exist (`:75-80`), stamps ownerRef→Project (`:82-88`), and emits RBAC with subject `<group>-<projectID>` (`resources.go:69,106`). None of that applies to admin bindings — a **second, non-RBAC branch** that evaluates user groups and writes `User.spec.admin` + the provenance annotation. Same reconcile logic as Approach 2's controller, just living inside the GPB controller. |
-| Dashboard consumers | Everything that lists GPBs assumes project semantics and must **filter out** `role: admin`: `modules/api/pkg/provider/kubernetes/member.go:196-201` (`MapUserToGroups` would otherwise emit a broken `<group>-` group), `GroupMappingsFor` callers incl. `/me` (`handler/v1/user/user.go:344`); also `cmd/alertmanager-authorization-server/main.go:201` in this repo lists GPBs for group access. Per-project lists (`GET /projects/{id}/groupbindings`) are label-filtered so admin bindings (no project label) stay invisible there — good. |
-| UI | Project Groups page role dropdown must NOT offer `admin` (that page is project-scoped); a separate Admin-Panel surface is still needed to create admin bindings — so the UI work is roughly the same as Approach 2's. |
-| Edition | GPB is EE-only (CE webhook rejects all writes, `wrappers_ce.go`) — extending it makes group-admin **automatically EE-only**, closing the CE/EE open question by construction. |
+- **CRD schema** — the role list and the currently-mandatory project reference both change on a CRD that is already shipped to customers.
+- **Validation** — new rules to keep the two flavors apart (admin bindings must not name a project, project bindings must).
+- **Existing controller** — the current reconcile path (project lookup, ownership, RBAC generation) doesn't apply to admin bindings; it needs a second branch doing what Approach 2's controller would do.
+- **Every consumer that lists these bindings** — dashboard group/role resolution and the alertmanager authorization server read all bindings assuming project semantics; each needs to skip admin entries.
+- **UI** — the project-level Groups page must not offer the admin role, and a separate Admin-Panel surface is still needed to manage admin bindings — so the UI effort is about the same as with a new CRD.
+- **Edition** — `GroupProjectBinding` is Enterprise-only, so extending it makes group-admin automatically EE-only.
 
-Trade-off in one line: Approach 2 adds a new kind but touches nothing that ships; Approach 3 adds no kind but reaches into a shipped EE CRD's schema, webhook, reconciler, and every consumer that lists it. Both end at the same place — a reconcile branch writing `User.spec.admin` + annotation — so the **enforcement design is identical**; the choice is purely about where the binding lives. Rough surface: Approach 2 ≈ new files only (types/CRD done, controller + webhook + wiring pending); Approach 3 ≈ edits across 6+ existing shipped files plus the same pending reconcile logic.
+Trade-off in one line: Approach 2 adds a new kind but touches nothing that ships; Approach 3 adds no kind but reaches into a shipped feature's schema, validation, controller, and consumers. Both end at the same place — a reconcile branch writing `User.spec.admin` + annotation — so the **enforcement design is identical**; the choice is purely about where the binding lives.
 
-Also investigated and ruled out: reusing GPB **without** schema changes (blocked by the apiserver enum itself) and pointing an `admin` binding at a real project (ownerRef→Project means deleting that project garbage-collects the admin binding silently).
+Also investigated and ruled out: reusing GPB **without** any schema change (the apiserver's role whitelist rejects `admin` outright) and pointing an admin binding at a real project (the binding is owned by its project, so deleting that project would silently delete the admin binding with it).
 
 **Decisions:** provenance — annotation over status field (Approach 2 over Approach 1): zero `User` CRD change, richer provenance, dashboard keeps working untouched. CRD shape — new `AdminGroupBinding` vs extended `GroupProjectBinding` — **open**, needs maintainer decision (see open questions); both documented above.
 
