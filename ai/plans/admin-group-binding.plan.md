@@ -134,7 +134,45 @@ flowchart TD
 
 The annotation needs no API change in either repo and carries more information: it names the granting binding, which is exactly what the UI needs for a "via group X" badge and what the controller checks before demoting. The trade-off is ergonomics — a typed bool is nicer in Go than a string lookup — but that is not worth a cross-repo schema change.
 
-**Decision: Approach 2.** Zero `User` CRD change, richer provenance, dashboard keeps working untouched.
+### Approach 3 — extend the existing `GroupProjectBinding` with a new `admin` role
+
+Instead of a new CRD, teach the existing GPB to carry global admin: add `admin` to the role enum and let a binding with that role mean "members of this group are KKP administrators." The attraction is real: the CRD, its validation webhook, seed-sync controller, v2 API endpoints, and the project Groups UI already exist and ship today, and admins would manage one kind of group binding instead of two.
+
+```mermaid
+flowchart TD
+    A["GroupProjectBinding<br/>group: platform-admins<br/>role: admin<br/>(projectID: none — schema change)"] --> R[GPB reconciler — new branch]
+    L[OIDC login] -->|UserSaver writes Spec.Groups| U[User CR]
+    U -->|watch| R
+    R --> DEC{role == admin?}
+    DEC -->|yes| ADM["skip Project lookup, skip RBAC generation<br/>evaluate groups → write User.spec.admin<br/>+ granted-by-group annotation"]
+    DEC -->|no| RBAC["existing path unchanged:<br/>Get(Project), ownerRef, CRB/RB with<br/>subject group-projectID"]
+    ADM --> C[same consumers as Approach 2]
+```
+
+What it actually takes (traced from the investigation, file:line):
+
+| Layer | Change |
+|---|---|
+| CRD schema | `admin` added to role enum (`sdk/apis/kubermatic/v1/group_project_binding.go:65`); `projectID` made optional (`:60-63` — drop required, add `omitempty`; pattern must tolerate absence). Schema change to a **shipped EE CRD**. |
+| Webhook | `pkg/ee/validation/groupprojectbinding/`: `role: admin` must require empty `projectID` (and vice-versa: project roles require it); duplicate-admin-group check; keep projectID immutability for project roles. |
+| Reconciler | `pkg/ee/group-project-binding/controller/reconciler.go`: today it hard-stops if the Project doesn't exist (`:75-80`), stamps ownerRef→Project (`:82-88`), and emits RBAC with subject `<group>-<projectID>` (`resources.go:69,106`). None of that applies to admin bindings — a **second, non-RBAC branch** that evaluates user groups and writes `User.spec.admin` + the provenance annotation. Same reconcile logic as Approach 2's controller, just living inside the GPB controller. |
+| Dashboard consumers | Everything that lists GPBs assumes project semantics and must **filter out** `role: admin`: `modules/api/pkg/provider/kubernetes/member.go:196-201` (`MapUserToGroups` would otherwise emit a broken `<group>-` group), `GroupMappingsFor` callers incl. `/me` (`handler/v1/user/user.go:344`); also `cmd/alertmanager-authorization-server/main.go:201` in this repo lists GPBs for group access. Per-project lists (`GET /projects/{id}/groupbindings`) are label-filtered so admin bindings (no project label) stay invisible there — good. |
+| UI | Project Groups page role dropdown must NOT offer `admin` (that page is project-scoped); a separate Admin-Panel surface is still needed to create admin bindings — so the UI work is roughly the same as Approach 2's. |
+| Edition | GPB is EE-only (CE webhook rejects all writes, `wrappers_ce.go`) — extending it makes group-admin **automatically EE-only**, closing the CE/EE open question by construction. |
+
+Trade-off in one line: Approach 2 adds a new kind but touches nothing that ships; Approach 3 adds no kind but reaches into a shipped EE CRD's schema, webhook, reconciler, and every consumer that lists it. Both end at the same place — a reconcile branch writing `User.spec.admin` + annotation — so the **enforcement design is identical**; the choice is purely about where the binding lives. Rough surface: Approach 2 ≈ new files only (types/CRD done, controller + webhook + wiring pending); Approach 3 ≈ edits across 6+ existing shipped files plus the same pending reconcile logic.
+
+Also investigated and ruled out: reusing GPB **without** schema changes (blocked by the apiserver enum itself) and pointing an `admin` binding at a real project (ownerRef→Project means deleting that project garbage-collects the admin binding silently).
+
+**Decisions:** provenance — annotation over status field (Approach 2 over Approach 1): zero `User` CRD change, richer provenance, dashboard keeps working untouched. CRD shape — new `AdminGroupBinding` vs extended `GroupProjectBinding` — **open**, needs maintainer decision (see open questions); both documented above.
+
+### Why a controller must write `spec.admin` (and not the dashboard UI/API)
+
+Neither approach modifies how admin is *read* — `User.spec.admin` already exists; the question is who writes it. Investigation of the dashboard (`modules/api`) settles it:
+
+- Admin is funneled through one translation point: `pkg/provider/userinfo.go:70` builds `UserInfo{IsAdmin: user.Spec.IsAdmin}`; ~180 downstream gates (196 occurrences, 52 files) read the computed field. Computing admin per-request from bindings instead would mean changing that funnel plus the bypass sites: `handler/middleware/middleware.go:251`, `provider/kubernetes/member.go:202,289`, `handler/v1/project/project.go:179-209`, `api/v1/types.go:613` (`/me`, what the web `AdminGuard` reads), and the Administrators provider (`provider/kubernetes/admin.go`). ≈7–8 sites across 3 layers, plus a bindings List on every request.
+- Decisive: readers **outside** the dashboard — alertmanager-authorization-server (`cmd/alertmanager-authorization-server/main.go:234`) and the Grafana MLA controllers (`pkg/controller/seed-controller-manager/mla/`) — read the persisted flag and know nothing about bindings. With dynamic evaluation, group-derived admins would never get Grafana/Alertmanager admin.
+- With a controller persisting `spec.admin`: zero dashboard changes for the admin decision; every existing reader keeps working.
 
 ### Rejected earlier: config field instead of a CRD
 
