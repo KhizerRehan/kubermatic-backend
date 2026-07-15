@@ -94,66 +94,89 @@ Because the controller writes `Spec.IsAdmin` (single source of truth), **no exis
 
 ## 5. Approaches
 
-Both approaches share the same mechanism: a reconciler in this repo watches `AdminGroupBinding` + `User` and writes `User.Spec.IsAdmin` in both directions (promote and demote). The dashboard already writes `User.Spec.Groups` at login, so every login triggers a reconcile — the dashboard auth path never changes. What differs between the two approaches is how the system remembers **why** a user is an admin, which is what protects manually-granted admins from ever being demoted by group logic.
+Three options. All share the same machine: a controller watches the group source + `User`, compares the configured group names against the user's OIDC groups (`EvaluateAdminGroups()`, `sdk/apis/kubermatic/v1/admin_group_binding.go:91`), and writes `User.Spec.IsAdmin` — the single flag every consumer already reads. The dashboard already writes `User.Spec.Groups` at login, so the auth path never changes. What differs is **where the admin group names live**: a settings field, a dedicated CRD, or the existing `GroupProjectBinding`.
 
-### Approach 1 — new `IsGroupAdmin` property on the `User` CRD
+### Approach 1 — admin group list in `KubermaticSetting` (Ahmed)
 
-Add `UserStatus.IsGroupAdmin bool`. The reconciler sets it alongside `Spec.IsAdmin`; a user with `IsGroupAdmin: false` is never touched.
+No new CRD. Store admin group names as a list field on the existing `globalsettings`
+`KubermaticSetting` (`sdk/apis/kubermatic/v1/settings.go:26`, `SettingSpec` at `:53`) — e.g.
+`spec.adminGroups: ["kubermatic:admin-kkp-team", "kubermatic:admin-kdp-team"]`. New controller
+watches `KubermaticSetting` + `User`, matches the list against the user's OIDC groups, and sets a
+new `Status.IsGroupAdmin` bool on the User CRD to grant admin. Existing readers use a helper
+checking `isAdmin || isGroupAdmin`.
+
+```mermaid
+flowchart TD
+    S["KubermaticSetting globalsettings<br/>spec.adminGroups: [admin-kkp, admin-kdp]"] --> R[settings-admin-controller]
+    L[OIDC login] -->|UserSaver writes Spec.Groups| U[User CR]
+    U -->|watch| R
+    R --> DEC{user groups ∈ adminGroups?}
+    DEC -->|yes| P["Spec.IsAdmin = true<br/>Status.IsGroupAdmin = true"]
+    DEC -->|no & IsGroupAdmin=true| D["Spec.IsAdmin = false<br/>Status.IsGroupAdmin = false"]
+    DEC -->|IsGroupAdmin=false| N["never touch (manual admin)"]
+```
+
+**Pros:** no new CRD; admin groups managed on one existing settings object, editable from the
+Admin-Panel Defaults UI that already exists; a simple string list, no per-binding objects.
+
+**Concerns:**
+- **Leaks admin group names.** `globalsettings` is streamed in full to **every authenticated user**
+  via `/ws/admin/settings` — admin group names become visible to all. Security regression a
+  dedicated CRD (RBAC-gated) avoids.
+- **User CRD schema change** — `Status.IsGroupAdmin` bool → deepcopy + CRD YAML regen here, and
+  dashboard SDK re-vendor + model plumbing (same cost as Approach 2 flavor (a)).
+- **No per-group provenance** — a flat list + one bool says *that* a group granted admin, not
+  *which*; harder to show a "via group X" badge or audit which group to remove.
+- **Mixes concerns** — `KubermaticSetting` is a grab-bag of dashboard prefs; putting a security
+  authorization control there is an odd fit and widens who can edit an admin-granting field.
+
+### Approach 2 — dedicated `AdminGroupBinding` CRD (recommended)
+
+New cluster-scoped CRD carrying just a group name + `isAdmin`/`isGlobalViewer`. New controller watches `AdminGroupBinding` + `User`; on any change it matches the binding's group against the user's OIDC groups and promotes/demotes. Provenance is tracked so **manual admins are never demoted by group logic**.
 
 ```mermaid
 flowchart TD
     L[OIDC login] -->|UserSaver writes Spec.Groups| U[User CR]
-    B[AdminGroupBinding changed] --> R[reconciler]
+    B[AdminGroupBinding created/changed/deleted] --> R[admin-group-binding-controller]
     U -->|watch| R
-    R --> DEC{groups match binding?}
-    DEC -->|match & not admin| P["Spec.IsAdmin = true<br/>Status.IsGroupAdmin = true"]
-    DEC -->|no match & IsGroupAdmin=true| D["Spec.IsAdmin = false<br/>Status.IsGroupAdmin = false"]
-    DEC -->|IsGroupAdmin=false| N["never touch<br/>(manual admin)"]
-    P --> API[User CRD schema change:<br/>deepcopy + CRD YAML regen]
-    API --> DASH["dashboard repo must follow:<br/>SDK re-vendor · API model · UI model"]
+    R --> DEC{user groups match binding?}
+    DEC -->|match| P["Spec.IsAdmin = true<br/>+ provenance mark"]
+    DEC -->|no match & provenance present| D["Spec.IsAdmin = false<br/>remove provenance"]
+    DEC -->|provenance absent| N["never touch<br/>(manual admin / first-user / service accounts)"]
 ```
 
-Cost: it is a `User` CRD schema change. Deepcopy and CRD YAML must be regenerated here, and the dashboard repo has to re-vendor the SDK and plumb the new property through its API and UI models before it can use it. The field is also just a boolean — it says *that* a group granted admin, not *which* group.
+**Provenance — one sub-decision:**
 
-### Approach 2 — annotation on the `User` object (chosen)
+- **(a) new `Status.IsGroupAdmin` bool on the User CRD** — User schema change → deepcopy + CRD YAML regen here, and dashboard must re-vendor the SDK and plumb the property through its API + UI models. Bool only: says *that* a group granted admin, not *which*.
+- **(b) annotation `admin.kubermatic.k8c.io/granted-by-group: <binding>`** (already defined, `admin_group_binding.go:33`) — no schema change in either repo; names *which* binding granted admin (drives a "via group X" badge); dashboard reads it as plain object metadata. **Pick (b).**
 
-No schema change. The reconciler stamps `admin.kubermatic.k8c.io/granted-by-group: <binding name>` (already defined, `sdk/apis/kubermatic/v1/admin_group_binding.go:33`) when promoting, and only demotes users carrying the annotation.
+**Pros:** clean semantics — the CRD name says what it does; no project baggage; provenance (b) needs zero API change; independent of the EE-only `GroupProjectBinding`.
+**Cons:** net-new CRD + controller + validation webhook + Admin-Panel UI surface to build; admins now learn two binding kinds (GPB for projects, AGB for admin).
+
+### Approach 3 — reuse `GroupProjectBinding` with a new `admin` role
+
+No new CRD. Add `admin` to the GPB role enum; a binding with `role: admin` and empty `projectID` means "members of this group are KKP administrators." A new branch in the GPB controller skips the project/RBAC path and instead evaluates groups → writes `User.Spec.IsAdmin` + the provenance annotation.
 
 ```mermaid
 flowchart TD
-    L[OIDC login] -->|UserSaver writes Spec.Groups| U[User CR]
-    B[AdminGroupBinding changed] --> R[reconciler]
-    U -->|watch| R
-    R --> DEC{groups match binding?}
-    DEC -->|match & not admin| P["Spec.IsAdmin = true<br/>+ annotation granted-by-group: &lt;binding&gt;"]
-    DEC -->|no match & annotation present| D["Spec.IsAdmin = false<br/>remove annotation"]
-    DEC -->|annotation absent| N["never touch<br/>(manual admin / first-user auto-admin / service accounts)"]
-    P --> META["no User CRD change —<br/>annotation is plain object metadata"]
-    META --> DASH["dashboard reads annotation as-is:<br/>'via group X' badge, no SDK/model change"]
-```
-
-The annotation needs no API change in either repo and carries more information: it names the granting binding, which is exactly what the UI needs for a "via group X" badge and what the controller checks before demoting. The trade-off is ergonomics — a typed bool is nicer in Go than a string lookup — but that is not worth a cross-repo schema change.
-
-### Approach 3 — extend the existing `GroupProjectBinding` with a new `admin` role
-
-Instead of a new CRD, teach the existing GPB to carry global admin: add `admin` to the role enum and let a binding with that role mean "members of this group are KKP administrators." The attraction is real: the CRD, its validation webhook, seed-sync controller, v2 API endpoints, and the project Groups UI already exist and ship today, and admins would manage one kind of group binding instead of two.
-
-```mermaid
-flowchart TD
-    A["GroupProjectBinding<br/>group: platform-admins<br/>role: admin<br/>(projectID: none — schema change)"] --> R[GPB reconciler — new branch]
+    A["GroupProjectBinding<br/>group: platform-admins<br/>role: admin<br/>projectID: none — schema change"] --> R[GPB controller — new branch]
     L[OIDC login] -->|UserSaver writes Spec.Groups| U[User CR]
     U -->|watch| R
     R --> DEC{role == admin?}
     DEC -->|yes| ADM["skip Project lookup, skip RBAC generation<br/>evaluate groups → write User.spec.admin<br/>+ granted-by-group annotation"]
     DEC -->|no| RBAC["existing path unchanged:<br/>Get(Project), ownerRef, CRB/RB with<br/>subject group-projectID"]
-    ADM --> C[same consumers as Approach 2]
 ```
 
-It is workable, but not for free — an admin binding has no project, and everything around `GroupProjectBinding` today assumes there is one. The areas it touches:
+**Pros:** reuses the shipped CRD, its webhook, seed-sync controller, v2 API endpoints, and Groups UI plumbing; one binding kind to manage.
 
-- **CRD schema** — the role list and the currently-mandatory project reference both change on a CRD that is already shipped to customers.
-- **Validation** — new rules to keep the two flavors apart (admin bindings must not name a project, project bindings must).
-- **Existing controller** — the current reconcile path (project lookup, ownership, RBAC generation) doesn't apply to admin bindings; it needs a second branch doing what Approach 2's controller would do.
-- **Every consumer that lists these bindings** — dashboard group/role resolution and the alertmanager authorization server read all bindings assuming project semantics; each needs to skip admin entries.
-- **UI** — the project-level Groups page must not offer the admin role, and a separate Admin-Panel surface is still needed to manage admin bindings — so the UI effort is about the same as with a new CRD.
-- **Edition** — `GroupProjectBinding` is Enterprise-only, so extending it makes group-admin automatically EE-only.
+**Concerns (why it costs more than it looks):**
+- `projectID` is today **mandatory and immutable** (webhook-enforced). Admin bindings have no project → must make it optional and relax the webhook = **schema change on a CRD already shipped to customers.**
+- **Misleading name:** a "Group**Project**Binding" with no project confuses admins and GitOps authors.
+- **Every consumer assumes project semantics** — dashboard project list, `MapUserToGroups`, the alertmanager authorization server all read GPBs expecting a projectID; each must learn to skip admin/empty-projectID entries.
+- **Controller split:** the existing reconcile (project lookup, ownerRef, RBAC generation) doesn't apply to admin bindings; needs a second branch doing exactly what Approach 2's controller does.
+- `GroupProjectBinding` is **EE-only** → group-admin becomes EE-only by inheritance.
+- A separate Admin-Panel UI surface is still needed regardless → **UI savings ≈ zero.**
+
+### Recommendation
+
+**Approach 2, provenance flavor (b) — annotation.** It keeps admin semantics on their own clean CRD, avoids mutating a shipped customer CRD and its validation rules, and the annotation carries more information than a bool at no cross-repo cost. Approach 1 (settings list) is rejected on security — `globalsettings` leaks admin group names to every authenticated user — plus it still costs a User CRD change and drops per-group provenance. Approach 3 (GPB reuse) savings are mostly illusory once the projectID relaxation, consumer fan-out, and still-required UI are counted.
