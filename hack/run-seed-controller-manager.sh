@@ -20,8 +20,8 @@ cd $(dirname $0)/..
 source hack/lib.sh
 
 KUBERMATIC_EDITION=${KUBERMATIC_EDITION:-ce}
-KUBERMATIC_WORKERNAME=${KUBERMATIC_WORKERNAME:-$(uname -n)}
-KUBERMATIC_DEBUG=${KUBERMATIC_DEBUG:-true}
+KUBERMATIC_WORKERNAME=${KUBERMATIC_WORKERNAME:-headlamplocaltest}
+KUBERMATIC_DEBUG=${KUBERMATIC_DEBUG:-false}
 KUBERMATIC_SEED=${KUBERMATIC_SEED:-shared}
 KUBERMATIC_EXTERNAL_URL=${KUBERMATIC_EXTERNAL_URL:-dev.kubermatic.io}
 PPROF_PORT=${PPROF_PORT:-6600}
@@ -70,7 +70,7 @@ set -x
   -ca-bundle=$CA_BUNDLE \
   -addons-path=addons \
   -feature-gates=OpenIDAuthPlugin=true \
-  -worker-name="$(worker_name)" \
+  -worker-name=$KUBERMATIC_WORKERNAME \
   -external-url=$KUBERMATIC_EXTERNAL_URL \
   -docker-pull-config-json-file=$DOCKERCONFIGJSON \
   -oidc-issuer-url=$OIDC_ISSUER_URL \
@@ -79,6 +79,6 @@ set -x
   -log-debug=$KUBERMATIC_DEBUG \
   -log-format=Console \
   -max-parallel-reconcile=10 \
-  -pprof-listen-address=":${PPROF_PORT}" \
+  -pprof-listen-address=:6600 \
   -logtostderr \
-  -v=4 # Log-level for the Kube dependencies. Increase up to 9 to get request-level logs.
+  -v=4

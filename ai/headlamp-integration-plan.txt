@@ -1,0 +1,220 @@
+# Headlamp Integration — Implementation Plan
+
+## Context
+
+KKP needs to integrate Headlamp as a seed-side per-user-cluster deployment, mirroring the
+existing kubernetes-dashboard pattern. Headlamp works out-of-cluster with a mounted kubeconfig
+(-kubeconfig flag, port 4466).
+
+Spec:  docs/superpowers/specs/2026-03-31-headlamp-integration-design.md
+Issue: https://github.com/kubermatic/kubermatic/issues/15287
+
+
+## Implementation Phases
+
+=== Phase 1: API Types & Constants ===
+
+Files to modify:
+
+1. sdk/apis/kubermatic/v1/cluster.go — Add new types and methods:
+
+   // Headlamp struct (near KubernetesDashboard struct, ~line 288)
+   type Headlamp struct {
+       Enabled bool `json:"enabled,omitempty"`
+   }
+
+   // New field on ClusterSpec (near KubernetesDashboard field, ~line 232)
+   Headlamp *Headlamp `json:"headlamp,omitempty"`
+
+   // IsHeadlampEnabled method (near IsKubernetesDashboardEnabled, ~line 294)
+   func (c ClusterSpec) IsHeadlampEnabled() bool {
+       return c.Headlamp == nil || c.Headlamp.Enabled
+   }
+
+   // Health field on ClusterHealth (near KubernetesDashboard health, ~line 1734)
+   Headlamp *HealthStatus `json:"headlamp,omitempty"`
+
+2. pkg/resources/resources.go — Add constants:
+
+   HeadlampDeploymentName         = "headlamp"
+   HeadlampKubeconfigSecretName   = "headlamp-kubeconfig"
+   HeadlampCertUsername           = "kubermatic:headlamp"
+   HeadlampClusterRoleName        = "system:headlamp"
+   HeadlampClusterRoleBindingName = "system:headlamp"
+
+3. pkg/defaulting/cluster.go — Add defaulting (~line 141, after KubernetesDashboard):
+
+   if spec.Headlamp == nil {
+       spec.Headlamp = &kubermaticv1.Headlamp{Enabled: true}
+   }
+
+4. Run deepcopy generation — sdk/apis/kubermatic/v1/zz_generated.deepcopy.go needs regeneration
+5. Run CRD generation — Update kubermatic.k8c.io_clusters.yaml and kubermatic.k8c.io_clustertemplates.yaml
+
+
+=== Phase 2: Seed-Side Resources ===
+
+Files to create:
+
+1. pkg/resources/headlamp/deployment.go — Seed-side Deployment reconciler
+   - Mirror structure of pkg/resources/kubernetes-dashboard/deployment.go
+   - headlampData interface: Cluster(), RewriteImage()
+   - DeploymentReconciler(data) -> NamedDeploymentReconcilerFactory
+   - Image: ghcr.io/headlamp-k8s/headlamp:v0.26.0
+   - Command: ["/headlamp/headlamp-server"]
+   - Args: ["-kubeconfig", "/etc/kubernetes/kubeconfig/kubeconfig", "-html-static-dir", "/headlamp/frontend"]
+   - Port: 4466
+   - 2 replicas, anti-affinity, apiserver.IsRunningWrapper
+   - SecurityContext: runAsUser 100, runAsGroup 101, readOnlyRootFilesystem, no privilege escalation
+   - Resources: cpu 100m/250m, memory 128Mi/256Mi
+   - Volume mounts: kubeconfig secret + tmp emptydir
+   - ImagePullSecrets, restart annotation, autoscaler annotation
+
+2. pkg/resources/headlamp/deletion.go — Seed-side deletion
+   - ResourcesForDeletion(namespace string) []ctrlruntimeclient.Object
+   - Returns: Deployment + kubeconfig Secret
+
+
+=== Phase 3: User-Cluster Resources ===
+
+Files to create under pkg/controller/user-cluster-controller-manager/resources/resources/headlamp/:
+
+1. constants.go   — Namespace = "headlamp", AppName = "headlamp"
+2. namespace.go   — NamespaceReconciler() creating headlamp namespace with PSA baseline labels
+3. clusterrole.go — ClusterRoleReconciler() with read access:
+     APIGroups: "", apps, batch, networking.k8s.io, rbac.authorization.k8s.io,
+                storage.k8s.io, apiextensions.k8s.io, policy, autoscaling
+     Resources: *
+     Verbs: get, list, watch
+     + metrics.k8s.io for pods/nodes
+4. clusterrolebinding.go — ClusterRoleBindingReconciler() binding to User kubermatic:headlamp
+5. deletion.go    — ResourcesForDeletion() returning ClusterRole, ClusterRoleBinding, Namespace
+
+
+=== Phase 4: Wire Into Seed Controller Manager ===
+
+Files to modify:
+
+1. pkg/controller/seed-controller-manager/kubernetes/resources.go:
+   - Import headlamp "k8c.io/kubermatic/v2/pkg/resources/headlamp"
+   - In deployment reconcilers (~line 440): add headlamp.DeploymentReconciler(data) when IsHeadlampEnabled()
+   - In ensureSecrets (~line 555): add kubeconfig secret via GetInternalKubeconfigReconciler when enabled
+   - In ensureResourcesAreDeployed (~line 207): add cleanup block when disabled
+   - Add ensureHeadlampResourcesAreRemoved() method
+
+2. pkg/controller/seed-controller-manager/kubernetes/health.go:
+   - Add headlampHealthCheck() method (same pattern as kubernetesDashboardHealthCheck)
+   - Wire into health check block (~line 113)
+
+
+=== Phase 5: Wire Into User-Cluster Controller Manager ===
+
+File to modify: pkg/controller/user-cluster-controller-manager/resources/reconciler.go
+
+1. Import headlamp "k8c.io/kubermatic/v2/pkg/controller/user-cluster-controller-manager/resources/resources/headlamp"
+2. Add headlampEnabled bool to reconcileData struct (~line 1178)
+3. Set from cluster.Spec.IsHeadlampEnabled() (~line 154)
+4. In cleanup block (~line 297): add ensureHeadlampResourcesAreRemoved when disabled
+5. In reconcileNamespaces: append headlamp.NamespaceReconciler when enabled
+6. In reconcileClusterRoles: append headlamp.ClusterRoleReconciler() when enabled
+7. In reconcileClusterRoleBindings: append headlamp.ClusterRoleBindingReconciler() when enabled
+8. Add ensureHeadlampResourcesAreRemoved() method
+
+
+=== Phase 6: Image Registration ===
+
+File to modify: pkg/install/images/images.go
+- Add fakeCluster.Spec.Headlamp = &kubermaticv1.Headlamp{Enabled: true} for image pre-pulling
+
+
+## Critical Files Reference
+
+  pkg/resources/kubernetes-dashboard/deployment.go
+    -> Template for seed deployment
+
+  pkg/resources/kubernetes-dashboard/deletion.go
+    -> Template for seed deletion
+
+  pkg/controller/user-cluster-controller-manager/resources/resources/kubernetes-dashboard/
+    -> Template for all user-cluster resources
+
+  pkg/controller/seed-controller-manager/kubernetes/resources.go
+    -> Seed reconciler integration
+
+  pkg/controller/seed-controller-manager/kubernetes/health.go
+    -> Health check integration
+
+  pkg/controller/user-cluster-controller-manager/resources/reconciler.go
+    -> User-cluster reconciler integration
+
+  sdk/apis/kubermatic/v1/cluster.go     -> API types
+  pkg/resources/resources.go            -> Constants
+  pkg/defaulting/cluster.go             -> Defaulting
+
+
+## Local Testing
+
+Prerequisites:
+  - ~/.kube/dev.kubeconfig pointing to the dev seed cluster
+  - A running user cluster on that seed (e.g. v99jth46cb)
+
+Step 1: Label the test cluster
+-------
+  export KUBECONFIG=~/.kube/dev.kubeconfig
+  export TEST_CLUSTER=v99jth46cb
+
+  # NOTE: hack/run-seed-controller-manager.sh sanitizes worker-name (strips non-alphanumeric)
+  # "headlamp-local-test" becomes "headlamplocaltest"
+  kubectl label cluster $TEST_CLUSTER worker-name=headlamplocaltest --overwrite
+
+  # Enable headlamp explicitly
+  kubectl patch cluster $TEST_CLUSTER --type=merge -p '{"spec":{"headlamp":{"enabled":true}}}'
+
+Step 2: Run seed-controller-manager with log file
+-------
+  cd /Users/mac/Work/Github/kubermatic/kkp.worktree/headlamp-migration
+
+  KUBERMATIC_WORKERNAME=headlamplocaltest \
+    ./hack/run-seed-controller-manager.sh 2>&1 | tee /tmp/headlamp-controller.log
+
+  # In another terminal:
+  tail -f /tmp/headlamp-controller.log
+  grep -i headlamp /tmp/headlamp-controller.log
+
+Step 3: Verify
+-------
+  export KUBECONFIG=~/.kube/dev.kubeconfig
+
+  # Watch for headlamp deployment + secret
+  watch kubectl -n cluster-v99jth46cb get deploy,secret 2>&1 | grep headlamp
+
+  # Port-forward and open UI
+  kubectl -n cluster-v99jth46cb port-forward deploy/headlamp 4466:4466
+  # Open http://localhost:4466
+
+  # Check health status
+  kubectl get cluster v99jth46cb -o jsonpath='{.status.extendedHealth.headlamp}'
+
+Step 4: Test disable
+-------
+  kubectl patch cluster $TEST_CLUSTER --type=merge -p '{"spec":{"headlamp":{"enabled":false}}}'
+  kubectl -n cluster-v99jth46cb get deploy,secret | grep headlamp
+  # Should return nothing
+
+Cleanup:
+-------
+  kubectl label cluster $TEST_CLUSTER worker-name-
+  kubectl patch cluster $TEST_CLUSTER --type=merge -p '{"spec":{"headlamp":null}}'
+  rm -f /tmp/headlamp-controller.log
+
+
+## Verification Checklist
+
+1. Go compiles: go build ./...
+2. Deepcopy + CRD generation runs cleanly
+3. CRD schema includes new headlamp field in both clusters and clustertemplates CRDs
+4. headlamp Deployment appears in cluster-<id> namespace on seed when enabled
+5. headlamp-kubeconfig Secret created alongside it
+6. Port-forward to 4466 shows Headlamp UI connected to user cluster
+7. Disabling headlamp removes Deployment + Secret
+8. extendedHealth.headlamp reflects deployment availability
